@@ -6,8 +6,11 @@ import streamlit as st
 import joblib
 from datetime import datetime
 
-# Ensure src module can be imported cleanly
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 
 # Set Page Configuration
 st.set_page_config(
@@ -57,89 +60,113 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Universal Dataset Finder - Checks root, data/, and all filename variations
 project_root = os.path.dirname(os.path.abspath(__file__))
 
-def find_dataset():
-    search_dirs = [project_root, os.path.join(project_root, "data")]
-    target_names = ["car data.csv", "car_data.csv", "car-data.csv", "cardata.csv"]
-    
-    # 1. Direct search in common locations
-    for s_dir in search_dirs:
-        if os.path.exists(s_dir):
-            for name in target_names:
-                p = os.path.join(s_dir, name)
-                if os.path.exists(p):
-                    return p
-                    
-    # 2. Recursive search across entire project directory
-    for root, dirs, files in os.walk(project_root):
-        for file in files:
-            if file.lower().endswith(".csv") and "car" in file.lower():
-                return os.path.join(root, file)
+# 1. Self-contained dataset search (works at root level or data/ level)
+def locate_csv_file():
+    candidates = [
+        os.path.join(project_root, "car data.csv"),
+        os.path.join(project_root, "car_data.csv"),
+        os.path.join(project_root, "data", "car data.csv"),
+        os.path.join(project_root, "data", "car_data.csv")
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+            
+    # Fallback: scan root directory for any .csv file
+    for file in os.listdir(project_root):
+        if file.endswith(".csv"):
+            return os.path.join(project_root, file)
+            
+    # Fallback: scan data/ directory if exists
+    data_dir = os.path.join(project_root, "data")
+    if os.path.exists(data_dir):
+        for file in os.listdir(data_dir):
+            if file.endswith(".csv"):
+                return os.path.join(data_dir, file)
                 
     return None
 
-def find_model():
-    m_path = os.path.join(project_root, "models", "car_price_model.pkl")
-    if os.path.exists(m_path):
-        return m_path
-    m_root = os.path.join(project_root, "car_price_model.pkl")
-    if os.path.exists(m_root):
-        return m_root
-    return m_path
+# 2. Self-contained model search
+def locate_model_file():
+    candidates = [
+        os.path.join(project_root, "models", "car_price_model.pkl"),
+        os.path.join(project_root, "car_price_model.pkl")
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
 
-data_path = find_dataset()
-model_path = find_model()
+csv_path = locate_csv_file()
+pkl_path = locate_model_file()
 
+# 3. Self-contained model builder & loader
 @st.cache_resource
-def load_or_train_model(m_path, d_path):
-    if m_path and os.path.exists(m_path):
+def get_pipeline(model_file, data_file):
+    # Try loading serialized model first
+    if model_file and os.path.exists(model_file):
         try:
-            return joblib.load(m_path)
+            return joblib.load(model_file)
         except Exception:
             pass
             
-    if d_path and os.path.exists(d_path):
+    # Self-contained fallback model trainer
+    if data_file and os.path.exists(data_file):
         try:
-            from src.preprocessing import load_data, clean_data, create_features, get_preprocessor
-            from sklearn.pipeline import Pipeline
-            from sklearn.linear_model import LinearRegression
+            df = pd.read_csv(data_file)
+            df = df.rename(columns={'Kms_Driven': 'Driven_kms', 'Seller_Type': 'Selling_type'})
+            df = df.drop_duplicates().reset_index(drop=True)
             
-            df_raw = load_data(d_path)
-            df_clean = clean_data(df_raw, drop_duplicates=True)
-            df_processed = create_features(df_clean, top_n_cars=20)
-            
-            X = df_processed.drop(columns=['Selling_Price'])
-            y = df_processed['Selling_Price']
+            current_yr = max(datetime.now().year, df['Year'].max() if 'Year' in df.columns else 2018)
+            if 'Year' in df.columns:
+                df['Car_Age'] = current_yr - df['Year']
+                df = df.drop(columns=['Year'])
+                
+            if 'Car_Name' in df.columns:
+                top_cars = df['Car_Name'].value_counts().head(20).index.tolist()
+                df['Car_Name'] = df['Car_Name'].apply(lambda x: x if x in top_cars else 'Other')
+                
+            X = df.drop(columns=['Selling_Price'])
+            y = df['Selling_Price']
             
             cat_cols = ['Car_Name', 'Fuel_Type', 'Selling_type', 'Transmission']
             num_cols = ['Present_Price', 'Driven_kms', 'Owner', 'Car_Age']
             
-            preprocessor = get_preprocessor(cat_cols, num_cols)
-            pipeline = Pipeline([('preprocessor', preprocessor), ('model', LinearRegression())])
-            pipeline.fit(X, y)
+            preprocessor = ColumnTransformer(
+                transformers=[
+                    ('num', StandardScaler(), num_cols),
+                    ('cat', OneHotEncoder(drop='first', handle_unknown='ignore', sparse_output=False), cat_cols)
+                ],
+                remainder='drop'
+            )
             
-            os.makedirs(os.path.dirname(m_path), exist_ok=True)
-            joblib.dump(pipeline, m_path)
-            return pipeline
+            pipe = Pipeline([
+                ('preprocessor', preprocessor),
+                ('model', LinearRegression())
+            ])
+            pipe.fit(X, y)
+            return pipe
         except Exception as e:
-            st.error(f"Auto-training model failed: {e}")
+            st.error(f"Error building internal pipeline: {e}")
             return None
             
     return None
 
 @st.cache_data
-def get_car_names(d_path):
-    if d_path and os.path.exists(d_path):
-        df = pd.read_csv(d_path)
-        if 'Car_Name' in df.columns:
-            names = sorted(df['Car_Name'].unique().tolist())
-            return names
+def load_car_options(data_file):
+    if data_file and os.path.exists(data_file):
+        try:
+            df = pd.read_csv(data_file)
+            if 'Car_Name' in df.columns:
+                return sorted(df['Car_Name'].unique().tolist())
+        except Exception:
+            pass
     return ['city', 'corolla altis', 'verna', 'fortuner', 'brio', 'ciaz', 'innova', 'i20', 'grand i10', 'ertiga', 'swift', 'ritz']
 
-pipeline = load_or_train_model(model_path, data_path)
-car_name_options = get_car_names(data_path)
+pipeline = get_pipeline(pkl_path, csv_path)
+car_options = load_car_options(csv_path)
 
 # Header & Description
 st.markdown('<div class="main-title">🚗 Car Price Prediction</div>', unsafe_allow_html=True)
@@ -148,19 +175,17 @@ st.markdown('<div class="sub-title">Estimate the resale selling price of used ca
 st.divider()
 
 if pipeline is None:
-    st.error("⚠️ Dataset CSV file not found on server.")
-    st.info("Files detected in project folder: " + str(os.listdir(project_root)))
+    st.error("⚠️ Dataset CSV file not found on server. Please ensure `car data.csv` is uploaded to your GitHub repository.")
     st.stop()
 
 # Input Form Layout
 st.subheader("📋 Enter Vehicle Details")
 
 col1, col2 = st.columns(2)
-
 current_year = datetime.now().year
 
 with col1:
-    car_name = st.selectbox("Car Model / Name", options=car_name_options, index=car_name_options.index('ciaz') if 'ciaz' in car_name_options else 0)
+    car_name = st.selectbox("Car Model / Name", options=car_options, index=car_options.index('ciaz') if 'ciaz' in car_options else 0)
     year = st.number_input("Purchase Year", min_value=2000, max_value=current_year, value=2017, step=1)
     present_price = st.number_input("Present Ex-Showroom Price (₹ in Lakhs)", min_value=0.10, max_value=100.00, value=9.85, step=0.10, help="1 Lakh = ₹ 1,00,000")
     driven_kms = st.number_input("Total Distance Driven (in Kilometers)", min_value=100, max_value=500000, value=15000, step=1000)
@@ -171,11 +196,8 @@ with col2:
     transmission = st.selectbox("Transmission", options=['Manual', 'Automatic'], index=0)
     owner = st.selectbox("Number of Previous Owners", options=[0, 1, 3], index=0)
 
-# Feature Engineering in App: Dynamic Car Age
 car_age = current_year - year
-
 st.info(f"💡 **Calculated Car Age:** **{car_age} year(s)** (Current Year {current_year} - Purchase Year {year})")
-
 st.markdown("<br>", unsafe_allow_html=True)
 
 # Prediction Action
