@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS styling for premium look
+# Custom CSS styling
 st.markdown("""
     <style>
     .main-title {
@@ -57,19 +57,50 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Path to model and data
+# Universal Dataset Finder - Checks root, data/, and all filename variations
 project_root = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(project_root, "models", "car_price_model.pkl")
-data_path = os.path.join(project_root, "data", "car data.csv")
+
+def find_dataset():
+    search_dirs = [project_root, os.path.join(project_root, "data")]
+    target_names = ["car data.csv", "car_data.csv", "car-data.csv", "cardata.csv"]
+    
+    # 1. Direct search in common locations
+    for s_dir in search_dirs:
+        if os.path.exists(s_dir):
+            for name in target_names:
+                p = os.path.join(s_dir, name)
+                if os.path.exists(p):
+                    return p
+                    
+    # 2. Recursive search across entire project directory
+    for root, dirs, files in os.walk(project_root):
+        for file in files:
+            if file.lower().endswith(".csv") and "car" in file.lower():
+                return os.path.join(root, file)
+                
+    return None
+
+def find_model():
+    m_path = os.path.join(project_root, "models", "car_price_model.pkl")
+    if os.path.exists(m_path):
+        return m_path
+    m_root = os.path.join(project_root, "car_price_model.pkl")
+    if os.path.exists(m_root):
+        return m_root
+    return m_path
+
+data_path = find_dataset()
+model_path = find_model()
 
 @st.cache_resource
-def load_or_train_model(path, d_path):
-    # 1. Load pre-trained model if available
-    if os.path.exists(path):
-        return joblib.load(path)
-    
-    # 2. Self-healing fallback: Auto-train model if file is missing on cloud
-    if os.path.exists(d_path):
+def load_or_train_model(m_path, d_path):
+    if m_path and os.path.exists(m_path):
+        try:
+            return joblib.load(m_path)
+        except Exception:
+            pass
+            
+    if d_path and os.path.exists(d_path):
         try:
             from src.preprocessing import load_data, clean_data, create_features, get_preprocessor
             from sklearn.pipeline import Pipeline
@@ -89,8 +120,8 @@ def load_or_train_model(path, d_path):
             pipeline = Pipeline([('preprocessor', preprocessor), ('model', LinearRegression())])
             pipeline.fit(X, y)
             
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            joblib.dump(pipeline, path)
+            os.makedirs(os.path.dirname(m_path), exist_ok=True)
+            joblib.dump(pipeline, m_path)
             return pipeline
         except Exception as e:
             st.error(f"Auto-training model failed: {e}")
@@ -99,11 +130,12 @@ def load_or_train_model(path, d_path):
     return None
 
 @st.cache_data
-def get_car_names(path):
-    if os.path.exists(path):
-        df = pd.read_csv(path)
-        names = sorted(df['Car_Name'].unique().tolist())
-        return names
+def get_car_names(d_path):
+    if d_path and os.path.exists(d_path):
+        df = pd.read_csv(d_path)
+        if 'Car_Name' in df.columns:
+            names = sorted(df['Car_Name'].unique().tolist())
+            return names
     return ['city', 'corolla altis', 'verna', 'fortuner', 'brio', 'ciaz', 'innova', 'i20', 'grand i10', 'ertiga', 'swift', 'ritz']
 
 pipeline = load_or_train_model(model_path, data_path)
@@ -116,7 +148,8 @@ st.markdown('<div class="sub-title">Estimate the resale selling price of used ca
 st.divider()
 
 if pipeline is None:
-    st.error("⚠️ Dataset or model file not found. Please ensure `data/car data.csv` is uploaded to GitHub.")
+    st.error("⚠️ Dataset CSV file not found on server.")
+    st.info("Files detected in project folder: " + str(os.listdir(project_root)))
     st.stop()
 
 # Input Form Layout
