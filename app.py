@@ -6,6 +6,9 @@ import streamlit as st
 import joblib
 from datetime import datetime
 
+# Ensure src module can be imported cleanly
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 # Set Page Configuration
 st.set_page_config(
     page_title="Car Price Prediction ML",
@@ -60,10 +63,40 @@ model_path = os.path.join(project_root, "models", "car_price_model.pkl")
 data_path = os.path.join(project_root, "data", "car data.csv")
 
 @st.cache_resource
-def load_trained_model(path):
-    if not os.path.exists(path):
-        return None
-    return joblib.load(path)
+def load_or_train_model(path, d_path):
+    # 1. Load pre-trained model if available
+    if os.path.exists(path):
+        return joblib.load(path)
+    
+    # 2. Self-healing fallback: Auto-train model if file is missing on cloud
+    if os.path.exists(d_path):
+        try:
+            from src.preprocessing import load_data, clean_data, create_features, get_preprocessor
+            from sklearn.pipeline import Pipeline
+            from sklearn.linear_model import LinearRegression
+            
+            df_raw = load_data(d_path)
+            df_clean = clean_data(df_raw, drop_duplicates=True)
+            df_processed = create_features(df_clean, top_n_cars=20)
+            
+            X = df_processed.drop(columns=['Selling_Price'])
+            y = df_processed['Selling_Price']
+            
+            cat_cols = ['Car_Name', 'Fuel_Type', 'Selling_type', 'Transmission']
+            num_cols = ['Present_Price', 'Driven_kms', 'Owner', 'Car_Age']
+            
+            preprocessor = get_preprocessor(cat_cols, num_cols)
+            pipeline = Pipeline([('preprocessor', preprocessor), ('model', LinearRegression())])
+            pipeline.fit(X, y)
+            
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            joblib.dump(pipeline, path)
+            return pipeline
+        except Exception as e:
+            st.error(f"Auto-training model failed: {e}")
+            return None
+            
+    return None
 
 @st.cache_data
 def get_car_names(path):
@@ -73,7 +106,7 @@ def get_car_names(path):
         return names
     return ['city', 'corolla altis', 'verna', 'fortuner', 'brio', 'ciaz', 'innova', 'i20', 'grand i10', 'ertiga', 'swift', 'ritz']
 
-pipeline = load_trained_model(model_path)
+pipeline = load_or_train_model(model_path, data_path)
 car_name_options = get_car_names(data_path)
 
 # Header & Description
@@ -83,7 +116,7 @@ st.markdown('<div class="sub-title">Estimate the resale selling price of used ca
 st.divider()
 
 if pipeline is None:
-    st.error("⚠️ Model file (`models/car_price_model.pkl`) not found. Please run `python src/train_model.py` first to train and save the model.")
+    st.error("⚠️ Dataset or model file not found. Please ensure `data/car data.csv` is uploaded to GitHub.")
     st.stop()
 
 # Input Form Layout
@@ -114,7 +147,6 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 # Prediction Action
 if st.button("🚀 Predict Car Price", use_container_width=True, type="primary"):
-    # Group Car_Name if model was trained with top_n_cars
     input_data = pd.DataFrame([{
         'Car_Name': car_name,
         'Present_Price': present_price,
