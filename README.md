@@ -3,7 +3,7 @@
 A complete, production-ready Machine Learning regression system that predicts the **selling price of used cars** based on historical vehicle characteristics using scikit-learn and Streamlit.
 
 ---
-
+App Link :-  https://car-price-prediction-dxtlquent4ohktvhxd7wan.streamlit.app/
 ## 📌 Project Objective
 
 The goal of this project is to build an end-to-end regression pipeline to predict car resale values (`Selling_Price` in **₹ Lakhs**). The project follows strict machine learning best practices:
